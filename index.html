@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Malaysia Weather Patterns (2000-2021)</title>
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+<style>
+  :root{--fg:#0f172a;--muted:#475569;--border:#e5e7eb;--bg:#fff;--card:#fff;--chip:#f1f5f9;}
+  html,body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.4;margin:0}
+  .wrap{max-width:1200px;margin:0 auto}
+  header{padding:24px 20px 8px}
+  h1{font-size:28px;margin:0 0 6px}
+  p.lead{color:var(--muted);margin:0 0 16px}
+  .controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center;padding:0 20px 16px}
+  .control{background:var(--chip);padding:8px 12px;border-radius:999px;font-size:14px;display:flex;gap:8px;align-items:center}
+  main{display:grid;grid-template-columns:1fr;gap:20px;padding:0 20px 40px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px}
+  .card h3{margin:0 0 6px;font-size:18px}
+  .caption{color:var(--muted);font-size:13px}
+  .stack{display:grid;gap:8px}
+  #season_rain, #season_temp { display:block; width:100%; }
+  footer{border-top:1px solid var(--border);padding:16px 20px;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+  <header class="wrap">
+    <h1>Malaysia Weather Patterns (2000-2021)</h1>
+    <p class="lead">Whole country choropleth + ranked bar + seasonal lines + small multiples. Use the year slider and state dropdown.</p>
+  </header>
+
+  <!-- TOP CONTROLS -->
+  <div class="controls wrap">
+    <div class="control">
+      <label for="yearRange"><strong>Year:</strong></label>
+      <input id="yearRange" type="range" min="2000" max="2021" step="1" value="2015" />
+      <span id="yearOut">2015</span>
+    </div>
+    <button id="resetBtn" class="control" style="cursor:pointer"><strong>Reset</strong></button>
+  </div>
+
+  <main class="wrap">
+    <!-- MAP -->
+    <section class="card">
+      <div class="stack">
+        <h3>Map — Annual Rainfall by State (whole Malaysia)</h3>
+        <div id="map"></div>
+        <div class="caption">Chosen year via slider. Hover for details.</div>
+      </div>
+    </section>
+
+    <!-- RANKED BAR -->
+    <section class="card">
+      <div class="stack">
+        <h3>Ranked — Wettest States</h3>
+        <div id="rankbar"></div>
+        <div class="caption">Sorted by annual rainfall for the chosen year.</div>
+      </div>
+    </section>
+
+    <!-- SEASONAL -->
+    <section class="card">
+      <h3>Seasonal Profiles — <span id="stateBadge">—</span></h3>
+      <div id="seasonControls" style="margin:4px 0 10px 0"></div>
+      <div id="season_rain" style="margin-bottom:8px"></div>
+      <div id="season_temp"></div>
+      <div class="caption">Monthly rain & temperature for the selected state and year.</div>
+    </section>
+
+    <!-- SMALL MULTIPLES -->
+    <section class="card">
+      <h3>Small Multiples — Annual Rainfall Trend by State</h3>
+      <div id="sm"></div>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <div>
+    Visualisation by Teh Zi Xiang
+    <br>
+    Data Source:
+    <a href="https://www.kaggle.com/datasets/shahmirvarqha/weather-data-malaysia/data?select=full_weather.csv" target="_blank" rel="noopener">
+      Kaggle: Malaysia Weather 
+    </a>,
+    <a href="https://archive.data.gov.my/data/dataset/mean-temperature-rainfall-and-mean-relative-humidity-malaysia/resource/15b3c8a2-ef0d-4044-8fc1-f261fa9cd7b0?view_id=12721827-5141-41f6-bab7-c70c9cc6ed11" target="_blank" rel="noopener">
+      data.gov.my: Mean Temp / Rainfall / RH
+    </a>.
+    </div>
+  <footer>  
+
+  <script>
+    // ---- file paths ----
+    const SY  = "./data/state_year.csv";
+    const SMY = "./data/state_month_year.csv";
+    const MAP_TOPO = "https://raw.githubusercontent.com/jnewbery/CartogramMalaysia/master/public/data/malaysia-states.topojson";
+
+    // ---- UI refs ----
+    const yearRange   = document.getElementById('yearRange');
+    const yearOut     = document.getElementById('yearOut');
+    const resetBtn    = document.getElementById('resetBtn');
+    const stateBadge  = document.getElementById('stateBadge');
+
+    // cache for state_year.csv 
+    let SY_ROWS = null;
+    async function getSYRows(){
+      if (SY_ROWS) return SY_ROWS;
+      const text = await fetch(SY).then(r => r.text());
+      const lines = text.trim().split(/\r?\n/);
+      const header = lines.shift().split(",");
+      const rows = lines.map(line => {
+        const cells = line.split(",");
+        const o = {};
+        header.forEach((h,i)=> o[h] = cells[i]);
+        o.state = String(o.state || "");
+        o.year  = +o.year;
+        o.rain_mm_y_fw   = +o.rain_mm_y_fw;
+        o.temp_mean_y_fw = +o.temp_mean_y_fw;
+        o.rh_mean_y_fw   = +o.rh_mean_y_fw;
+        return o;
+      });
+      SY_ROWS = rows;
+      return rows;
+    }
+
+    // Build the state dropdown (placed above Seasonal Profiles)
+    let stateSelect = null;
+    let statesList = [];
+    fetch(SY).then(r => r.text()).then(text => {
+      const lines = text.trim().split(/\r?\n/);
+      const header = lines.shift().split(",");
+      const iState = header.indexOf("state");
+      const set = new Set();
+      lines.forEach(line => { const c = line.split(","); if (c[iState]) set.add(c[iState]); });
+      statesList = Array.from(set).sort();
+
+      // keep first 12 states for small multiples (alphabetical)
+      window.first12States = statesList.slice(0, 12);
+
+      const holder = document.getElementById("seasonControls");
+      const label = document.createElement("label");
+      label.innerHTML = "<strong>State:&nbsp;</strong>";
+      stateSelect = document.createElement("select");
+      stateSelect.id = "stateSelect";
+      stateSelect.innerHTML = statesList.map(s => `<option value="${s}">${s}</option>`).join("");
+      holder.appendChild(label);
+      holder.appendChild(stateSelect);
+
+      stateBadge.textContent = stateSelect.value;
+      stateSelect.addEventListener('change', () => { stateBadge.textContent = stateSelect.value; renderSeasonal(); });
+
+      renderAll();
+    });
+
+    // Year slider
+    yearRange.addEventListener('input', () => {
+      yearOut.textContent = yearRange.value;
+      renderRankedBar();
+      renderSeasonal();
+      renderMap().catch(console.error);
+    });
+
+    // Reset
+    resetBtn.addEventListener('click', () => {
+      yearRange.value = 2015; yearOut.textContent = '2015';
+      if (stateSelect) { stateSelect.value = statesList[0]; stateBadge.textContent = stateSelect.value; }
+      renderAll();
+    });
+
+    function renderAll(){
+      yearOut.textContent = yearRange.value;
+      renderRankedBar();
+      renderSeasonal();
+      renderSmallMultiples();
+      renderMap().catch(console.error);
+    }
+
+    // ---------------- MAP (with graticule & ocean sphere) ----------------
+    async function renderMap(){
+      const yr = +yearRange.value;
+      const all = await getSYRows();
+      const yearRows = all.filter(r => r.year === yr);
+
+      const spec = {
+        $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+        width: 900, height: 520,
+        projection: { type: "mercator", center: [110, 4.5], scale: 2000 },
+
+        layer: [
+          // 1) Subtle ocean background (sphere)
+          { data: { sphere: true },
+            mark: { type: "geoshape", fill: "#f8fafc" } },
+
+          // 2) Graticule grid; tweak step for density
+          { data: { graticule: { step: [2, 2] } },
+            mark: { type: "geoshape", stroke: "#cbd5e1", strokeWidth: 0.6, opacity: 0.8 } },
+
+          // 3) State polygons with joined annual values for selected year
+          {
+            data: { url: MAP_TOPO, format: { type: "topojson", feature: "states" } },
+            transform: [{
+              lookup: "properties.Name",
+              from: { data: { values: yearRows }, key: "state",
+                      fields: ["rain_mm_y_fw","temp_mean_y_fw","rh_mean_y_fw","year"] }
+            }],
+            mark: { type: "geoshape", stroke: "#94a3b8", strokeWidth: 0.8 },
+            encoding: {
+              color: {
+                condition: {
+                  test: "isValid(datum.rain_mm_y_fw)",
+                  field: "rain_mm_y_fw", type: "quantitative",
+                  title: "Rainfall (mm)", scale: { scheme: "blues" }
+                },
+                value: "#e5e7eb" // fallback if no data
+              },
+              tooltip: [
+                { field: "properties.Name", type: "nominal", title: "State" },
+                { field: "year", type: "quantitative", title: "Year" },
+                { field: "rain_mm_y_fw", type: "quantitative", title: "Rain (mm)" },
+                { field: "temp_mean_y_fw", type: "quantitative", title: "Temp (°C)" },
+                { field: "rh_mean_y_fw", type: "quantitative", title: "RH (%)" }
+              ]
+            }
+          }
+        ]
+      };
+
+      await vegaEmbed("#map", spec, { actions:false });
+    }
+
+    // ---------------- RANKED BAR ----------------
+    function renderRankedBar(){
+      const spec = {
+        $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+        width: 1100,
+        height: { step: 22 },
+        params: [{ name: "yr", value: +yearRange.value }],
+        data: { url: SY },
+        transform: [
+          { calculate: "toNumber(datum.year)", as: "year_num" },
+          { filter: "datum.year_num == yr" },
+          { filter: "isValid(datum.rain_mm_y_fw) && datum.rain_mm_y_fw > 0" }
+        ],
+        layer: [
+          {
+            mark: { type: "bar", cornerRadiusEnd: 2, tooltip: true },
+            encoding: {
+              y: { field: "state", type: "nominal", sort: "-x", title: "" },
+              x: { field: "rain_mm_y_fw", type: "quantitative", title: "Rain (mm, annual)" },
+              color: { value: "#60a5fa" },
+              tooltip: [
+                { field: "state", type: "nominal" },
+                { field: "year_num", type: "quantitative", title: "Year" },
+                { field: "rain_mm_y_fw", type: "quantitative", title: "Rain (mm)" },
+                { field: "temp_mean_y_fw", type: "quantitative", title: "Temp (°C)" },
+                { field: "rh_mean_y_fw", type: "quantitative", title: "RH (%)" }
+              ]
+            }
+          },
+          {
+            mark: { type: "text", align: "left", dx: 3, fontSize: 11 },
+            encoding: {
+              y: { field: "state", type: "nominal", sort: "-x", title: "" },
+              x: { field: "rain_mm_y_fw", type: "quantitative" },
+              text: { field: "rain_mm_y_fw", type: "quantitative", format: ",.0f" }
+            }
+          }
+        ],
+        config: { view: { stroke: null }, axis: { labelFontSize: 11 } }
+      };
+      vegaEmbed("#rankbar", spec, { actions:false });
+    }
+
+    // ---------------- SEASONAL (stacked, one above the other) ----------------
+    function renderSeasonal(){
+      if (!stateSelect) return;
+      const stateName = stateSelect.value;
+      const yr = +yearRange.value;
+      stateBadge.textContent = stateName;
+
+      const monthOrder = [1,2,3,4,5,6,7,8,9,10,11,12];
+
+      const rain = {
+        $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+        width: 1100, height: 300,
+        data: { url: SMY },
+        transform: [
+          { calculate: "trim(datum.state)", as: "state_trim" },
+          { calculate: "toNumber(datum.year)", as: "year_num" },
+          { calculate: "toNumber(datum.month)", as: "month_num" },
+          { filter: `datum.state_trim == '${stateName}' && datum.year_num == ${yr}` }
+        ],
+        mark: { type: "line", interpolate: "monotone", strokeWidth: 2, color: "#3b82f6" },
+        encoding: {
+          x: { field: "month_num", type: "ordinal", sort: monthOrder, title: "Month", scale: { domain: monthOrder } },
+          y: { field: "rain_mm", type: "quantitative", title: "Rain (mm)" }
+        },
+        config: { view: { stroke: null } }
+      };
+
+      const temp = {
+        $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+        width: 1100, height: 300,
+        data: { url: SMY },
+        transform: [
+          { calculate: "trim(datum.state)", as: "state_trim" },
+          { calculate: "toNumber(datum.year)", as: "year_num" },
+          { calculate: "toNumber(datum.month)", as: "month_num" },
+          { calculate: "toNumber(datum.temp_mean)", as: "temp_num" },
+          { filter: `datum.state_trim == '${stateName}' && datum.year_num == ${yr}` }
+        ],
+        mark: { type: "line", interpolate: "monotone", strokeWidth: 2, color: "#3b82f6" },
+        encoding: {
+          x: { field: "month_num", type: "ordinal", sort: monthOrder, title: "Month", scale: { domain: monthOrder } },
+          y: { field: "temp_num", type: "quantitative", title: "Mean Temp (°C)" }
+        },
+        config: { view: { stroke: null } }
+      };
+
+      vegaEmbed("#season_rain", rain, { actions:false });
+      vegaEmbed("#season_temp", temp, { actions:false });
+    }
+
+    // ---------------- SMALL MULTIPLES ----------------
+    function renderSmallMultiples(){
+      const spec = {
+        $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+        data: { url: SY },
+        transform: [
+          { calculate: "trim(datum.state)", as: "state_trim" },
+          { calculate: "toNumber(datum.year)", as: "year_num" },
+          { filter: "isValid(datum.rain_mm_y_fw)" },
+
+          { window: [{ op: "dense_rank", as: "sidx" }],
+            sort: [{ field: "state_trim", order: "ascending" }] },
+
+          { calculate: "floor((datum.sidx - 1)/3) + 1", as: "row_i" },
+          { calculate: "((datum.sidx - 1) % 3) + 1",  as: "col_i" },
+
+          { joinaggregate: [{ op: "min", field: "state_trim", as: "state_lbl" }],
+            groupby: ["sidx"] }
+        ],
+
+        facet: {
+          row:    { field: "row_i", type: "ordinal", header: null },
+          column: { field: "col_i", type: "ordinal", header: null }
+        },
+
+        spec: {
+          spacing: 0,
+          vconcat: [
+            {
+              width: 300,
+              height: 150,
+              mark: { type: "line", interpolate: "monotone" },
+              encoding: {
+                x: {
+                  field: "year_num", type: "quantitative",
+                  title: "Year",
+                  axis: { labelAngle: 0, tickCount: 5, labelOverlap: true }
+                },
+                y: {
+                  field: "rain_mm_y_fw", type: "quantitative",
+                  title: "Rain (mm)",
+                  axis: { labelColor: "#334155", labelFontSize: 10, titleFontSize: 10 }
+                },
+                detail: { field: "state_trim" }
+              }
+            },
+            {
+              width: 300,
+              height: 22,
+              mark: { type: "text", align: "center", baseline: "top", dy: 2, fontSize: 12, color: "#334155" },
+              encoding: { text: { field: "state_lbl" } },
+              config: { axis: { grid: false, ticks: false, labels: false, domain: false } }
+            }
+          ]
+        },
+
+        resolve: { axis: { x: "independent", y: "independent" }, scale: { y: "independent" } },
+
+        config: {
+          view:  { stroke: null },
+          axis:  { labelFontSize: 11 },
+          facet: { spacing: 32 }
+        }
+      };
+
+      vegaEmbed("#sm", spec, { actions:false });
+    }
+  </script>
+</body>
+</html>
